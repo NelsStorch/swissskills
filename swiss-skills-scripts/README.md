@@ -54,6 +54,27 @@ The launcher provides a wide range of functions to help you build, diagnose, and
     - Find any AWS resource across your account by tag.
     - Get the ARN for common resources like S3 buckets and IAM users/roles.
 
+### VI. Diagnostics & Health Checks
+- **EC2 Connectivity:** Checks a selected instance for common connectivity issues (state, security groups, routing).
+- **S3 Public Website:** Verifies if an S3 bucket is correctly configured as a public website (website hosting, public access block, bucket policy).
+- **IAM Role Trust:** Displays the trust policy for a selected IAM role to debug "assume role" issues.
+- **CloudFormation Failure:** Finds and displays the specific reason for the most recent failure in a CloudFormation stack's event history.
+
+### VII. Advanced Networking
+- **VPC Peering:** Creates, accepts, and configures routing for a VPC Peering connection between two selected VPCs.
+- **VPC Endpoints:** Creates the required ECR and S3 endpoints for a private ECS cluster in a selected VPC.
+- **VPC Teardown:** Deletes all resources created by the "Create a full VPC" script (requires manual input of IDs).
+
+### VIII. Advanced Deployment & Configuration
+- **Lambda Deployment:** Packages a local directory and deploys it as a new Lambda function, including creating the necessary execution role.
+- **CodePipeline Creation:** Creates a simple CodeCommit-to-S3 pipeline from a template, including creating the service role.
+- **EC2 Configuration via SSM:** Executes a local shell script on a selected EC2 instance without needing SSH.
+- **DynamoDB Features:** Configures advanced features like TTL, Deletion Protection, or Backups on a DynamoDB table (best run from the command line).
+- **CloudWatch Alarm Creation:** Creates a CloudWatch alarm with detailed parameters (best run from the command line).
+
+### IX. Utilities
+- **Interactive Cheatsheet:** Provides quick syntax examples for complex commands, organized by service (e.g., `s3 crr`, `ec2 filter`).
+
 ## Advanced Usage
 
 While `main.sh` is the recommended interface, every function is backed by a standalone, executable script in the corresponding subdirectory (e.g., `vpc/`, `ec2/`). These can be run directly from the command line if you prefer. See the comments within each script for usage instructions.

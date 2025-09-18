@@ -28,7 +28,7 @@ if [ $? -eq 0 ]; then
         # us-east-1 returns a null location constraint, or "None" in some CLI versions
         REGION="us-east-1"
     fi
-
+    
     # S3 website endpoint formats vary by region
     if [ "$REGION" == "us-east-1" ]; then
         echo "Website hosting enabled successfully."

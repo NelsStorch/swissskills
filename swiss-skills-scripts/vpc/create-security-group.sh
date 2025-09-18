@@ -51,7 +51,7 @@ while true; do
 
     echo "Adding rule: Protocol=$protocol, Port=$port, CIDR=$cidr..."
     aws ec2 authorize-security-group-ingress --group-id "$GROUP_ID" --protocol "$protocol" --port "$port" --cidr "$cidr"
-
+    
     if [ $? -eq 0 ]; then
         echo "Rule added successfully."
     else

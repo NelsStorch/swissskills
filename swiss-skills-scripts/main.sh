@@ -28,12 +28,12 @@ select_vpc() {
     SELECTOR_RESULT=""
     local vpcs
     vpcs=$(aws ec2 describe-vpcs --query 'Vpcs[*].{ID:VpcId, Name:Tags[?Key==`Name`].Value | [0]}' --output json)
-
+    
     if [ -z "$vpcs" ] || [ "$vpcs" == "[]" ]; then
         echo -e "${RED}No VPCs found.${NC}"
         return 1
     fi
-
+    
     local options=()
     while IFS= read -r line; do
         local id=$(echo "$line" | jq -r '.ID')
@@ -41,7 +41,7 @@ select_vpc() {
         [ "$name" == "null" ] && name="-"
         options+=("$id ($name)")
     done < <(echo "$vpcs" | jq -c '.[]')
-
+    
     options+=("Cancel")
 
     echo -e "${YELLOW}Please select a VPC:${NC}"
@@ -74,7 +74,7 @@ select_instance() {
         [ "$name" == "null" ] && name="-"
         options+=("$id ($name)")
     done < <(echo "$instances" | jq -c '.[]')
-
+    
     options+=("Cancel")
 
     echo -e "${YELLOW}Please select an Instance:${NC}"
@@ -228,6 +228,205 @@ select_subnet() {
 
 # --- Runner Functions (Parameter gathering and script execution) ---
 
+# --- Advanced Network Runners ---
+run_setup_peering() {
+    clear; echo -e "${BLUE}--- Setup VPC Peering ---${NC}"
+    echo "Select Requester VPC:"
+    select_vpc; [ $? -ne 0 ] && press_enter_to_continue && return
+    local req_vpc=$SELECTOR_RESULT
+    echo "Select Accepter VPC:"
+    select_vpc; [ $? -ne 0 ] && press_enter_to_continue && return
+    local acc_vpc=$SELECTOR_RESULT
+    ./vpc/setup-vpc-peering.sh --requester-vpc-id "$req_vpc" --accepter-vpc-id "$acc_vpc"
+    press_enter_to_continue
+}
+
+run_create_endpoints() {
+    clear; echo -e "${BLUE}--- Create VPC Endpoints for ECS ---${NC}"
+    echo "Select the VPC to add endpoints to:"
+    select_vpc; [ $? -ne 0 ] && press_enter_to_continue && return
+    local vpc_id=$SELECTOR_RESULT
+    echo "Select one or more private subnets (press Enter after selection, Ctrl+D to finish):"
+    local subnets=()
+    while select_subnet "$vpc_id"; do
+        subnets+=("$SELECTOR_RESULT")
+    done
+    [ ${#subnets[@]} -eq 0 ] && { echo -e "${RED}At least one subnet is required.${NC}"; press_enter_to_continue; return; }
+    ./vpc/create-vpc-endpoints.sh --vpc-id "$vpc_id" --subnet-ids "${subnets[@]}"
+    press_enter_to_continue
+}
+
+run_teardown_vpc() {
+    clear; echo -e "${BLUE}--- Teardown Full VPC ---${NC}"
+    echo -e "${RED}WARNING: This is a destructive action.${NC}"
+    read -p "Are you sure you want to continue? (y/n): " choice
+    [ "$choice" != "y" ] && return
+
+    read -p "Enter VPC ID: " vpc_id
+    read -p "Enter Public Subnet ID: " public_subnet_id
+    read -p "Enter Private Subnet ID: " private_subnet_id
+    read -p "Enter Internet Gateway ID: " igw_id
+    read -p "Enter NAT Gateway ID: " nat_gw_id
+    read -p "Enter Public Route Table ID: " public_rt_id
+    read -p "Enter Private Route Table ID: " private_rt_id
+
+    [ -z "$vpc_id" ] && { echo "VPC ID is required."; press_enter_to_continue; return; }
+
+    ./vpc/teardown-full-vpc.sh \
+        --vpc-id "$vpc_id" \
+        --public-subnet-id "$public_subnet_id" \
+        --private-subnet-id "$private_subnet_id" \
+        --igw-id "$igw_id" \
+        --nat-gw-id "$nat_gw_id" \
+        --public-rt-id "$public_rt_id" \
+        --private-rt-id "$private_rt_id"
+    
+    press_enter_to_continue
+}
+
+# --- Deployment & Config Runners ---
+run_deploy_lambda() {
+    clear; echo -e "${BLUE}--- Deploy Lambda Function ---${NC}"
+    read -p "Enter Function Name: " func_name
+    read -p "Enter Runtime (e.g., python3.9): " runtime
+    read -p "Enter Handler (e.g., index.handler): " handler
+    read -p "Enter path to local code directory: " code_path
+    [ -z "$func_name" ] || [ -z "$runtime" ] || [ -z "$handler" ] || [ -z "$code_path" ] && { echo -e "${RED}All parameters are required.${NC}"; press_enter_to_continue; return; }
+    ./lambda/deploy-lambda-function.sh --name "$func_name" --runtime "$runtime" --handler "$handler" --path "$code_path"
+    press_enter_to_continue
+}
+
+run_create_codepipeline() {
+    clear; echo -e "${BLUE}--- Create CodePipeline (CodeCommit to S3) ---${NC}"
+    read -p "Enter Pipeline Name: " pipe_name
+    read -p "Enter CodeCommit Repository Name: " repo_name
+    read -p "Enter S3 Bucket Name for artifacts and deployment: " bucket_name
+    [ -z "$pipe_name" ] || [ -z "$repo_name" ] || [ -z "$bucket_name" ] && { echo -e "${RED}All parameters are required.${NC}"; press_enter_to_continue; return; }
+    ./codepipeline/create-codepipeline.sh --name "$pipe_name" --repo "$repo_name" --bucket "$bucket_name"
+    press_enter_to_continue
+}
+
+run_configure_ssm() {
+    clear; echo -e "${BLUE}--- Configure EC2 via SSM ---${NC}"
+    echo "Select the instance to configure:"
+    select_instance; [ $? -ne 0 ] && press_enter_to_continue && return
+    local inst_id=$SELECTOR_RESULT
+    read -p "Enter path to local configuration script to run: " script_path
+    [ -z "$script_path" ] && { echo -e "${RED}Script path is required.${NC}"; press_enter_to_continue; return; }
+    ./ssm/configure-ec2-instance-ssm.sh --instance-id "$inst_id" --script-path "$script_path"
+    press_enter_to_continue
+}
+
+run_set_ddb_features() {
+    clear; echo -e "${BLUE}--- Set DynamoDB Features ---${NC}"
+    read -p "Enter Table Name: " table_name
+    [ -z "$table_name" ] && { echo "Table Name is required."; press_enter_to_continue; return; }
+
+    local options=("Enable TTL" "Enable Deletion Protection" "Create Backup" "Cancel")
+    select opt in "${options[@]}"; do
+        case $opt in
+            "Enable TTL")
+                read -p "Enter TTL Attribute Name: " ttl_attr
+                [ -z "$ttl_attr" ] && { echo "Attribute Name is required."; break; }
+                ./dynamodb/set-dynamodb-features.sh --table-name "$table_name" --enable-ttl --attribute-name "$ttl_attr"
+                break
+                ;;
+            "Enable Deletion Protection")
+                ./dynamodb/set-dynamodb-features.sh --table-name "$table_name" --enable-deletion-protection
+                break
+                ;;
+            "Create Backup")
+                read -p "Enter Backup Name: " backup_name
+                [ -z "$backup_name" ] && { echo "Backup Name is required."; break; }
+                ./dynamodb/set-dynamodb-features.sh --table-name "$table_name" --create-backup --backup-name "$backup_name"
+                break
+                ;;
+            "Cancel")
+                break
+                ;;
+            *) echo "Invalid option $REPLY";;
+        esac
+    done
+    press_enter_to_continue
+}
+
+run_create_cw_alarm() {
+    clear; echo -e "${BLUE}--- Create CloudWatch Alarm ---${NC}"
+    
+    read -p "Enter Alarm Name: " alarm_name
+    read -p "Enter Metric Name (e.g., CPUUtilization): " metric_name
+    read -p "Enter Namespace (e.g., AWS/EC2): " namespace
+    read -p "Enter Statistic (e.g., Average): " statistic
+    read -p "Enter Period in seconds (e.g., 300): " period
+    read -p "Enter Evaluation Periods (e.g., 1): " eval_periods
+    read -p "Enter Threshold (e.g., 80): " threshold
+    read -p "Enter Comparison Operator (e.g., GreaterThanThreshold): " comparison_op
+    read -p "Enter Dimensions (optional, e.g., Name=InstanceId,Value=i-123): " dimensions
+    read -p "Enter SNS Topic ARN for action (optional): " sns_topic_arn
+
+    # Basic validation
+    if [ -z "$alarm_name" ] || [ -z "$metric_name" ] || [ -z "$namespace" ] || [ -z "$statistic" ] || [ -z "$period" ] || [ -z "$eval_periods" ] || [ -z "$threshold" ] || [ -z "$comparison_op" ]; then
+      echo -e "${RED}Error: Missing one or more required arguments.${NC}"
+      press_enter_to_continue
+      return
+    fi
+    
+    # Build array of arguments
+    local args=(
+        --name "$alarm_name"
+        --metric "$metric_name"
+        --namespace "$namespace"
+        --statistic "$statistic"
+        --period "$period"
+        --evaluation-periods "$eval_periods"
+        --threshold "$threshold"
+        --comparison-operator "$comparison_op"
+    )
+
+    if [ -n "$dimensions" ]; then
+        args+=(--dimensions "$dimensions")
+    fi
+
+    if [ -n "$sns_topic_arn" ]; then
+        args+=(--sns-topic-arn "$sns_topic_arn")
+    fi
+
+    ./cloudwatch/create-cw-alarm.sh "${args[@]}"
+    press_enter_to_continue
+}
+
+run_find_by_tag() {
+    clear; echo -e "${BLUE}--- Find Resources by Tag ---${NC}"
+    read -p "Enter Tag Key: " tag_key
+    read -p "Enter Tag Value: " tag_value
+    [ -z "$tag_key" ] || [ -z "$tag_value" ] && { echo -e "${RED}Tag key and value are required.${NC}"; press_enter_to_continue; return; }
+    ./utils/find-resources-by-tag.sh --tag-key "$tag_key" --tag-value "$tag_value"
+    press_enter_to_continue
+}
+
+run_get_arn() {
+    clear; echo -e "${BLUE}--- Get Resource ARN ---${NC}"
+    echo "Supported types: s3-bucket, iam-user, iam-role"
+    read -p "Enter resource type: " res_type
+    read -p "Enter resource name/ID: " res_name
+    [ -z "$res_type" ] || [ -z "$res_name" ] && { echo -e "${RED}All parameters are required.${NC}"; press_enter_to_continue; return; }
+    ./utils/get-arn.sh --type "$res_type" --name "$res_name"
+    press_enter_to_continue
+}
+
+run_cheat_sheet() {
+    clear; echo -e "${BLUE}--- Interactive Cheatsheet ---${NC}"
+    read -p "Enter a service/topic (e.g., s3, ec2) or leave blank for usage: " service
+    if [ -n "$service" ]; then
+        read -p "Enter a sub-topic (e.g., crr, filter): " sub_topic
+        ./utils/cheat.sh "$service" "$sub_topic"
+    else
+        ./utils/cheat.sh
+    fi
+    press_enter_to_continue
+}
+
+# --- Original Runner Functions ---
 # VPC Runners
 run_create_vpc() {
     clear; echo -e "${BLUE}--- Create a simple VPC ---${NC}"
@@ -251,14 +450,11 @@ run_create_full_vpc() {
 
 run_create_sg() {
     clear; echo -e "${BLUE}--- Create a Security Group ---${NC}"
-
     select_vpc
     [ $? -ne 0 ] && press_enter_to_continue && return
     local vpc_id=$SELECTOR_RESULT
-
     read -p "Enter Group Name: " sg_name
     read -p "Enter Description: " sg_desc
-
     [ -z "$sg_name" ] || [ -z "$sg_desc" ] && { echo -e "${RED}Name and description are required.${NC}"; press_enter_to_continue; return; }
     ./vpc/create-security-group.sh --group-name "$sg_name" --description "$sg_desc" --vpc-id "$vpc_id"
     press_enter_to_continue
@@ -275,7 +471,6 @@ run_get_vpc_info() {
 
 run_get_subnet_route_table() {
     clear; echo -e "${BLUE}--- Get Subnet's Route Table ---${NC}"
-
     read -p "Filter subnets by VPC? (y/n): " choice
     local vpc_id=""
     if [[ "$choice" == "y" ]]; then
@@ -283,11 +478,9 @@ run_get_subnet_route_table() {
         [ $? -ne 0 ] && press_enter_to_continue && return
         vpc_id=$SELECTOR_RESULT
     fi
-
     select_subnet "$vpc_id"
     [ $? -ne 0 ] && press_enter_to_continue && return
     local subnet_id=$SELECTOR_RESULT
-
     ./vpc/get-subnet-route-table.sh "$subnet_id"
     press_enter_to_continue
 }
@@ -295,41 +488,29 @@ run_get_subnet_route_table() {
 # EC2 Runners
 run_launch_ec2() {
     clear; echo -e "${BLUE}--- Launch EC2 Instance ---${NC}"
-
-    # Select VPC first to filter other resources
     echo "First, select the VPC where the instance will be launched."
     select_vpc
     [ $? -ne 0 ] && press_enter_to_continue && return
     local vpc_id=$SELECTOR_RESULT
-
-    # Select Subnet from the chosen VPC
     echo -e "\nNow, select a subnet from VPC '$vpc_id'."
     select_subnet "$vpc_id"
     [ $? -ne 0 ] && press_enter_to_continue && return
     local subnet_id=$SELECTOR_RESULT
-
-    # Select Security Group from the chosen VPC
     echo -e "\nNow, select a security group from VPC '$vpc_id'."
     select_security_group "$vpc_id"
     [ $? -ne 0 ] && press_enter_to_continue && return
     local sg_id=$SELECTOR_RESULT
-
-    # Select IAM Role (Instance Profile)
     echo -e "\nNow, select an IAM Role (Instance Profile) to attach (optional)."
     select_iam_role
     local iam_profile=""
     if [ $? -eq 0 ]; then
         iam_profile=$SELECTOR_RESULT
     fi
-
-    # Get remaining text-based inputs
     read -p "Enter AMI ID (e.g., ami-0c55b159cbfafe1f0): " ami_id
     read -p "Enter Instance Type (e.g., t2.micro): " inst_type
     read -p "Enter Key Name: " key_name
     read -p "Enter Name Tag (optional): " name_tag
-
     [ -z "$ami_id" ] || [ -z "$inst_type" ] || [ -z "$key_name" ] && { echo -e "${RED}AMI ID, Instance Type, and Key Name are required.${NC}"; press_enter_to_continue; return; }
-
     ./ec2/launch-ec2-instance.sh "$ami_id" "$inst_type" "$key_name" "$sg_id" "$subnet_id" "$name_tag" "$iam_profile"
     press_enter_to_continue
 }
@@ -437,7 +618,6 @@ run_create_iam_user() {
     read -p "Create access key? (y/n): " key_choice
     read -p "Add to group? (Enter group name or leave blank): " group_name
     [ -z "$user_name" ] && { echo -e "${RED}User name is required.${NC}"; press_enter_to_continue; return; }
-
     args="--user-name $user_name"
     if [[ "$key_choice" == "y" ]]; then
         args="$args --create-access-key"
@@ -461,9 +641,7 @@ run_attach_iam_policy() {
     clear; echo -e "${BLUE}--- Attach IAM Policy ---${NC}"
     read -p "Enter Policy ARN: " policy_arn
     [ -z "$policy_arn" ] && { echo -e "${RED}Policy ARN is required.${NC}"; press_enter_to_continue; return; }
-
     read -p "Attach to user or role? (user/role): " target_type
-
     local args="--policy-arn $policy_arn"
     if [[ "$target_type" == "user" ]]; then
         read -p "Enter User Name: " user_name
@@ -499,76 +677,54 @@ run_simulate_permission() {
     press_enter_to_continue
 }
 
-# CloudFormation Runner
-run_get_stack_events() {
-    clear; echo -e "${BLUE}--- Get CloudFormation Stack Events ---${NC}"
+# Diagnostic Runners
+run_diagnose_ec2() {
+    clear; echo -e "${BLUE}--- Diagnose EC2 Connectivity ---${NC}"
+    select_instance
+    [ $? -ne 0 ] && press_enter_to_continue && return
+    local inst_id=$SELECTOR_RESULT
+    ./ec2/diagnose-connectivity.sh "$inst_id"
+    press_enter_to_continue
+}
+
+run_check_s3_website() {
+    clear; echo -e "${BLUE}--- Check S3 Public Website Config ---${NC}"
+    read -p "Enter Bucket Name to check: " bucket_name
+    [ -z "$bucket_name" ] && { echo -e "${RED}Bucket name is required.${NC}"; press_enter_to_continue; return; }
+    ./s3/check-public-website.sh "$bucket_name"
+    press_enter_to_continue
+}
+
+run_check_iam_trust() {
+    clear; echo -e "${BLUE}--- Check IAM Role Trust Policy ---${NC}"
+    select_iam_role
+    [ $? -ne 0 ] && press_enter_to_continue && return
+    local role_name=$SELECTOR_RESULT
+    ./iam/check-role-trust.sh "$role_name"
+    press_enter_to_continue
+}
+
+run_find_cfn_failure() {
+    clear; echo -e "${BLUE}--- Find CloudFormation Failure Event ---${NC}"
     read -p "Enter Stack Name: " stack_name
     [ -z "$stack_name" ] && { echo -e "${RED}Stack name is required.${NC}"; press_enter_to_continue; return; }
-    ./cloudformation/get-stack-events.sh "$stack_name"
+    ./cloudformation/find-failed-resource.sh "$stack_name"
     press_enter_to_continue
 }
-
-# CloudWatch Runners
-run_get_latest_logs() {
-    clear; echo -e "${BLUE}--- Get Latest CloudWatch Logs ---${NC}"
-    select_log_group
-    [ $? -ne 0 ] && press_enter_to_continue && return
-    local log_group=$SELECTOR_RESULT
-
-    read -p "Enter number of lines to show (default 10): " limit
-
-    local args="--log-group-name $log_group"
-    if [ -n "$limit" ]; then
-        args="$args --limit $limit"
-    fi
-    ./cloudwatch/get-latest-logs.sh $args
-    press_enter_to_continue
-}
-
-run_filter_logs() {
-    clear; echo -e "${BLUE}--- Filter CloudWatch Logs ---${NC}"
-    select_log_group
-    [ $? -ne 0 ] && press_enter_to_continue && return
-    local log_group=$SELECTOR_RESULT
-
-    read -p "Enter Filter Pattern (e.g., ERROR or '{$.level = \"error\"}'): " pattern
-    [ -z "$pattern" ] && { echo -e "${RED}Filter pattern is required.${NC}"; press_enter_to_continue; return; }
-
-    ./cloudwatch/filter-logs.sh --log-group-name "$log_group" --filter-pattern "$pattern"
-    press_enter_to_continue
-}
-
-# Utility Runners
-run_find_by_tag() {
-    clear; echo -e "${BLUE}--- Find Resources by Tag ---${NC}"
-    read -p "Enter Tag Key: " tag_key
-    read -p "Enter Tag Value: " tag_value
-    [ -z "$tag_key" ] || [ -z "$tag_value" ] && { echo -e "${RED}Tag key and value are required.${NC}"; press_enter_to_continue; return; }
-    ./utils/find-resources-by-tag.sh --tag-key "$tag_key" --tag-value "$tag_value"
-    press_enter_to_continue
-}
-
-run_get_arn() {
-    clear; echo -e "${BLUE}--- Get Resource ARN ---${NC}"
-    echo "Supported types: s3-bucket, iam-user, iam-role"
-    read -p "Enter resource type: " res_type
-    read -p "Enter resource name/ID: " res_name
-    [ -z "$res_type" ] || [ -z "$res_name" ] && { echo -e "${RED}All parameters are required.${NC}"; press_enter_to_continue; return; }
-    ./utils/get-arn.sh --type "$res_type" --name "$res_name"
-    press_enter_to_continue
-}
-
 
 # --- Menus ---
 vpc_menu() {
-    local options=("Create a simple VPC" "Create a full VPC (Public/Private Subnets, GWs, etc.)" "Create a Security Group and add rules" "Get VPC Info" "Get Subnet's Route Table" "Back to Main Menu")
+    local options=("Create a simple VPC" "Create a full VPC" "Teardown a full VPC" "Setup VPC Peering" "Create VPC Endpoints for ECS" "Create a Security Group" "Get VPC Info" "Get Subnet's Route Table" "Back to Main Menu")
     while true; do
         clear; echo -e "${YELLOW}--- VPC Management ---${NC}"
         select opt in "${options[@]}"; do
             case $opt in
                 "Create a simple VPC") run_create_vpc; break ;;
-                "Create a full VPC (Public/Private Subnets, GWs, etc.)") run_create_full_vpc; break ;;
-                "Create a Security Group and add rules") run_create_sg; break ;;
+                "Create a full VPC") run_create_full_vpc; break ;;
+                "Teardown a full VPC") run_teardown_vpc; break ;;
+                "Setup VPC Peering") run_setup_peering; break ;;
+                "Create VPC Endpoints for ECS") run_create_endpoints; break ;;
+                "Create a Security Group") run_create_sg; break ;;
                 "Get VPC Info") run_get_vpc_info; break ;;
                 "Get Subnet's Route Table") run_get_subnet_route_table; break ;;
                 "Back to Main Menu") return ;;
@@ -579,13 +735,14 @@ vpc_menu() {
 }
 
 ec2_menu() {
-    local options=("Launch EC2 Instance" "Create Launch Template" "Get Instance Details" "Get Instance IP by Name" "List Instances by Tag" "Get Instance Security Groups" "Back to Main Menu")
+    local options=("Launch EC2 Instance" "Create Launch Template" "Configure EC2 via SSM" "Get Instance Details" "Get Instance IP by Name" "List Instances by Tag" "Get Instance Security Groups" "Back to Main Menu")
     while true; do
         clear; echo -e "${YELLOW}--- EC2 Management ---${NC}"
         select opt in "${options[@]}"; do
             case $opt in
                 "Launch EC2 Instance") run_launch_ec2; break ;;
                 "Create Launch Template") run_create_launch_template; break ;;
+                "Configure EC2 via SSM") run_configure_ssm; break ;;
                 "Get Instance Details") run_get_instance_details; break ;;
                 "Get Instance IP by Name") run_get_ip_by_name; break ;;
                 "List Instances by Tag") run_list_instances_by_tag; break ;;
@@ -633,18 +790,46 @@ iam_menu() {
     done
 }
 
-cloudformation_menu() {
-    run_get_stack_events
-}
-
-cloudwatch_menu() {
-    local options=("Get Latest Logs" "Filter Logs" "Back to Main Menu")
+deployment_menu() {
+    local options=("Deploy Lambda Function" "Create CodePipeline (CodeCommit->S3)" "Back to Main Menu")
     while true; do
-        clear; echo -e "${YELLOW}--- CloudWatch Management ---${NC}"
+        clear; echo -e "${YELLOW}--- Deployment & CI/CD ---${NC}"
         select opt in "${options[@]}"; do
             case $opt in
-                "Get Latest Logs") run_get_latest_logs; break ;;
-                "Filter Logs") run_filter_logs; break ;;
+                "Deploy Lambda Function") run_deploy_lambda; break ;;
+                "Create CodePipeline (CodeCommit->S3)") run_create_codepipeline; break ;;
+                "Back to Main Menu") return ;;
+                *) echo -e "${RED}Invalid option $REPLY${NC}"; press_enter_to_continue; break ;;
+            esac
+        done
+    done
+}
+
+advanced_config_menu() {
+    local options=("Set DynamoDB Features" "Create CloudWatch Alarm" "Back to Main Menu")
+    while true; do
+        clear; echo -e "${YELLOW}--- Advanced Configuration ---${NC}"
+        select opt in "${options[@]}"; do
+            case $opt in
+                "Set DynamoDB Features") run_set_ddb_features; break ;;
+                "Create CloudWatch Alarm") run_create_cw_alarm; break ;;
+                "Back to Main Menu") return ;;
+                *) echo -e "${RED}Invalid option $REPLY${NC}"; press_enter_to_continue; break ;;
+            esac
+        done
+    done
+}
+
+diagnostics_menu() {
+    local options=("Diagnose EC2 Connectivity" "Check S3 Public Website Config" "Check IAM Role Trust Policy" "Find CloudFormation Failure Event" "Back to Main Menu")
+    while true; do
+        clear; echo -e "${YELLOW}--- Diagnostic Scripts ---${NC}"
+        select opt in "${options[@]}"; do
+            case $opt in
+                "Diagnose EC2 Connectivity") run_diagnose_ec2; break ;;
+                "Check S3 Public Website Config") run_check_s3_website; break ;;
+                "Check IAM Role Trust Policy") run_check_iam_trust; break ;;
+                "Find CloudFormation Failure Event") run_find_cfn_failure; break ;;
                 "Back to Main Menu") return ;;
                 *) echo -e "${RED}Invalid option $REPLY${NC}"; press_enter_to_continue; break ;;
             esac
@@ -653,13 +838,14 @@ cloudwatch_menu() {
 }
 
 utility_menu() {
-    local options=("Find Resources by Tag" "Get Resource ARN" "Back to Main Menu")
+    local options=("Find Resources by Tag" "Get Resource ARN" "Interactive Cheatsheet" "Back to Main Menu")
     while true; do
         clear; echo -e "${YELLOW}--- Utility Scripts ---${NC}"
         select opt in "${options[@]}"; do
             case $opt in
                 "Find Resources by Tag") run_find_by_tag; break ;;
                 "Get Resource ARN") run_get_arn; break ;;
+                "Interactive Cheatsheet") run_cheat_sheet; break ;;
                 "Back to Main Menu") return ;;
                 *) echo -e "${RED}Invalid option $REPLY${NC}"; press_enter_to_continue; break ;;
             esac
@@ -668,7 +854,17 @@ utility_menu() {
 }
 
 main_menu() {
-    local options=("VPC Management" "EC2 Management" "S3 Management" "IAM Management" "CloudFormation Diagnosis" "CloudWatch Logs" "Utilities" "Exit")
+    local options=(
+        "VPC Management" 
+        "EC2 Management" 
+        "S3 Management" 
+        "IAM Management" 
+        "Deployment & CI/CD"
+        "Advanced Configuration"
+        "Diagnostics" 
+        "Utilities" 
+        "Exit"
+    )
     while true; do
         clear
         echo -e "${YELLOW}===== SwissSkills AWS Script Launcher =====${NC}"
@@ -679,8 +875,9 @@ main_menu() {
                 "EC2 Management") ec2_menu; break ;;
                 "S3 Management") s3_menu; break ;;
                 "IAM Management") iam_menu; break ;;
-                "CloudFormation Diagnosis") cloudformation_menu; break ;;
-                "CloudWatch Logs") cloudwatch_menu; break ;;
+                "Deployment & CI/CD") deployment_menu; break ;;
+                "Advanced Configuration") advanced_config_menu; break ;;
+                "Diagnostics") diagnostics_menu; break ;;
                 "Utilities") utility_menu; break ;;
                 "Exit") exit 0 ;;
                 *) echo -e "${RED}Invalid option $REPLY${NC}"; press_enter_to_continue; break ;;

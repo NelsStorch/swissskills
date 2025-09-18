@@ -1,0 +1,62 @@
+{
+  "pipeline": {
+    "name": "PIPELINE_NAME_PLACEHOLDER",
+    "roleArn": "ROLE_ARN_PLACEHOLDER",
+    "artifactStore": {
+      "type": "S3",
+      "location": "BUCKET_NAME_PLACEHOLDER"
+    },
+    "stages": [
+      {
+        "name": "Source",
+        "actions": [
+          {
+            "name": "Source",
+            "actionTypeId": {
+              "category": "Source",
+              "owner": "AWS",
+              "provider": "CodeCommit",
+              "version": "1"
+            },
+            "runOrder": 1,
+            "configuration": {
+              "RepositoryName": "REPO_NAME_PLACEHOLDER",
+              "BranchName": "main",
+              "PollForSourceChanges": "false"
+            },
+            "outputArtifacts": [
+              {
+                "name": "SourceOutput"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "Deploy",
+        "actions": [
+          {
+            "name": "Deploy",
+            "actionTypeId": {
+              "category": "Deploy",
+              "owner": "AWS",
+              "provider": "S3",
+              "version": "1"
+            },
+            "runOrder": 1,
+            "configuration": {
+              "BucketName": "BUCKET_NAME_PLACEHOLDER",
+              "Extract": "true"
+            },
+            "inputArtifacts": [
+              {
+                "name": "SourceOutput"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "version": 1
+  }
+}
