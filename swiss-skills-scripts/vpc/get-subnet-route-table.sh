@@ -1,29 +1,46 @@
 #!/bin/bash
 
 # Script to show the route table associated with a specific subnet.
-# Usage: ./get-subnet-route-table.sh <SUBNET_ID>
-# Example: ./get-subnet-route-table.sh subnet-0123456789abcdef0
+# Outputs the route table details in JSON format.
+# Usage: ./get-subnet-route-table.sh --subnet-id <SUBNET_ID>
+# Example: ./get-subnet-route-table.sh --subnet-id subnet-0123456789abcdef0
 
-# Check if a subnet ID was provided
-if [ -z "$1" ]; then
-  echo "Error: No subnet ID provided."
-  echo "Usage: $0 <SUBNET_ID>"
+# --- Argument Parsing ---
+SUBNET_ID=""
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --subnet-id)
+            SUBNET_ID="$2"
+            shift
+            ;;
+        *)
+            echo "Unknown parameter passed: $1" >&2
+            exit 1
+            ;;
+    esac
+    shift
+done
+
+# Validate arguments
+if [ -z "$SUBNET_ID" ]; then
+  echo "Error: The --subnet-id flag is required." >&2
+  echo "Usage: $0 --subnet-id <SUBNET_ID>" >&2
   exit 1
 fi
 
-SUBNET_ID=$1
+# --- Main Logic ---
+echo "Fetching route table for subnet: $SUBNET_ID..." >&2
 
-echo "Fetching route table for subnet: $SUBNET_ID..."
-
-# Describe the route tables, filtering by the association with the subnet ID
-aws ec2 describe-route-tables \
+aws_output=$(aws ec2 describe-route-tables \
     --filters "Name=association.subnet-id,Values=$SUBNET_ID" \
     --query 'RouteTables[*].{ID:RouteTableId, Routes:Routes, Associations:Associations}' \
-    --output json
+    --output json 2>&1)
 
 if [ $? -ne 0 ]; then
-    echo "An error occurred while fetching the route table. Check the subnet ID."
+    echo "An error occurred while fetching the route table. Check the subnet ID." >&2
+    echo "AWS CLI Error: $aws_output" >&2
     exit 1
 fi
 
-echo "Script finished."
+# Print the JSON output to stdout
+echo "$aws_output"

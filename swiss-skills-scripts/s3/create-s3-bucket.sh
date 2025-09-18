@@ -1,34 +1,55 @@
 #!/bin/bash
 
 # Script to create a new AWS S3 bucket.
-# Usage: ./create-s3-bucket.sh <BUCKET_NAME> [AWS_REGION]
-# Example: ./create-s3-bucket.sh my-unique-competition-bucket us-east-1
+# Outputs the bucket name on success.
+# Usage: ./create-s3-bucket.sh --bucket-name <BUCKET_NAME> [--region <AWS_REGION>]
+# Example: ./create-s3-bucket.sh --bucket-name my-unique-bucket --region us-east-1
 
-# Check if a bucket name was provided
-if [ -z "$1" ]; then
-  echo "Error: No bucket name provided."
-  echo "Usage: $0 <BUCKET_NAME> [AWS_REGION]"
+# --- Argument Parsing ---
+BUCKET_NAME=""
+AWS_REGION="us-east-1" # Default region
+
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --bucket-name)
+            BUCKET_NAME="$2"
+            shift
+            ;;
+        --region)
+            AWS_REGION="$2"
+            shift
+            ;;
+        *)
+            echo "Unknown parameter passed: $1" >&2
+            exit 1
+            ;;
+    esac
+    shift
+done
+
+# Validate arguments
+if [ -z "$BUCKET_NAME" ]; then
+  echo "Error: The --bucket-name flag is required." >&2
+  echo "Usage: $0 --bucket-name <BUCKET_NAME> [--region <AWS_REGION>]" >&2
   exit 1
 fi
 
-BUCKET_NAME=$1
-AWS_REGION=${2:-us-east-1} # Default to us-east-1 if no region is provided
-
-# Create the S3 bucket
-echo "Creating S3 bucket named '$BUCKET_NAME' in region '$AWS_REGION'..."
+# --- Main Logic ---
+echo "Creating S3 bucket named '$BUCKET_NAME' in region '$AWS_REGION'..." >&2
 
 # S3 buckets in us-east-1 don't need a location constraint.
 if [ "$AWS_REGION" == "us-east-1" ]; then
-    aws s3api create-bucket --bucket "$BUCKET_NAME" --region "$AWS_REGION"
+    aws_output=$(aws s3api create-bucket --bucket "$BUCKET_NAME" --region "$AWS_REGION" 2>&1)
 else
-    aws s3api create-bucket --bucket "$BUCKET_NAME" --region "$AWS_REGION" --create-bucket-configuration LocationConstraint="$AWS_REGION"
+    aws_output=$(aws s3api create-bucket --bucket "$BUCKET_NAME" --region "$AWS_REGION" --create-bucket-configuration LocationConstraint="$AWS_REGION" 2>&1)
 fi
 
 if [ $? -eq 0 ]; then
-  echo "S3 bucket '$BUCKET_NAME' created successfully."
+  echo "S3 bucket '$BUCKET_NAME' created successfully." >&2
+  # Output the bucket name to stdout
+  echo "$BUCKET_NAME"
 else
-  echo "Error creating S3 bucket. Bucket names must be globally unique."
+  echo "Error creating S3 bucket '$BUCKET_NAME'." >&2
+  echo "AWS CLI Error: $aws_output" >&2
   exit 1
 fi
-
-echo "Script finished."
